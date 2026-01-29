@@ -70,7 +70,7 @@ if ($app) {
     $envVars = $app['env_variables'];
     $resourceType = 'service';
 } else {
-    // Check applications table (standalone applications)
+    // Check applications table
     $stmt = $pdo->prepare("
         SELECT uuid, name, env_variables
         FROM applications
@@ -84,26 +84,6 @@ if ($app) {
         $appUuid = $app['uuid'];
         $envVars = $app['env_variables'];
         $resourceType = 'application';
-    } else {
-        // find the first service_application child and use that for env var operations
-        $stmt = $pdo->prepare("
-            SELECT sa.uuid AS app_uuid, sa.name AS app_name, sa.env_variables, s.uuid AS service_uuid
-            FROM service_applications sa
-            JOIN services s ON sa.service_id = s.id
-            WHERE s.uuid = :uuid
-            ORDER BY sa.created_at ASC
-            LIMIT 1
-        ");
-        $stmt->execute(['uuid' => $uuid]);
-        $app = $stmt->fetch(PDO::FETCH_ASSOC);
-        
-        if ($app) {
-            // Found a child service_application for this parent service
-            $appUuid = $app['app_uuid'];
-            $serviceUuid = $app['service_uuid'];
-            $envVars = $app['env_variables'];
-            $resourceType = 'service';
-        }
     }
 }
 
@@ -111,9 +91,7 @@ if (!$appUuid) {
     http_response_code(404);
     echo json_encode([
         'error' => 'Application not found',
-        'details' => 'UUID not found in service_applications or applications tables',
-        'uuid_searched' => $uuid,
-        'hint' => 'Make sure you are sending the APPLICATION UUID, not the SERVICE UUID. Check the last part of your Coolify URL.'
+        'uuid_searched' => $uuid
     ]);
     exit;
 }
