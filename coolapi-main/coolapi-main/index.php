@@ -214,7 +214,90 @@ if ($updateStmt->rowCount() === 0) {
 
 error_log('[Custom API] Successfully updated FQDN in database for UUID: ' . $appUuid);
 
-// ================= 5️⃣ Trigger redeploy via API =================
+// ================= 5️⃣ Update APP_URL Environment Variable =================
+$envUpdateResults = [];
+$appUrlForEnv = rtrim($protocol . $newDomain, '/'); // Remove port and trailing slash for APP_URL
+
+error_log('[Custom API] Attempting to update APP_URL environment variable to: ' . $appUrlForEnv);
+
+try {
+    // Common environment variable names that store the application URL
+    $urlEnvKeys = ['APP_URL', 'SITE_URL', 'BASE_URL', 'URL', 'APPLICATION_URL'];
+    
+    if ($resourceType === 'service') {
+        // For services, check environment_variables table linked to service_applications
+        $envStmt = $pdo->prepare("
+            SELECT id, key, value 
+            FROM environment_variables 
+            WHERE service_application_id = (SELECT id FROM service_applications WHERE uuid = :uuid)
+            AND UPPER(key) IN ('" . implode("','", $urlEnvKeys) . "')
+        ");
+        $envStmt->execute(['uuid' => $appUuid]);
+        $envVars = $envStmt->fetchAll(PDO::FETCH_ASSOC);
+        
+        foreach ($envVars as $envVar) {
+            error_log("[Custom API] Found environment variable: {$envVar['key']} with value: {$envVar['value']}");
+            
+            // Update the environment variable
+            $updateEnvStmt = $pdo->prepare("
+                UPDATE environment_variables 
+                SET value = :value, updated_at = NOW() 
+                WHERE id = :id
+            ");
+            $updateEnvStmt->execute(['value' => $appUrlForEnv, 'id' => $envVar['id']]);
+            
+            $envUpdateResults[] = [
+                'key' => $envVar['key'],
+                'old_value' => $envVar['value'],
+                'new_value' => $appUrlForEnv,
+                'updated' => true
+            ];
+            
+            error_log("[Custom API] Updated {$envVar['key']} from {$envVar['value']} to {$appUrlForEnv}");
+        }
+    } else {
+        // For standalone applications
+        $envStmt = $pdo->prepare("
+            SELECT id, key, value 
+            FROM environment_variables 
+            WHERE application_id = (SELECT id FROM applications WHERE uuid = :uuid)
+            AND UPPER(key) IN ('" . implode("','", $urlEnvKeys) . "')
+        ");
+        $envStmt->execute(['uuid' => $appUuid]);
+        $envVars = $envStmt->fetchAll(PDO::FETCH_ASSOC);
+        
+        foreach ($envVars as $envVar) {
+            error_log("[Custom API] Found environment variable: {$envVar['key']} with value: {$envVar['value']}");
+            
+            // Update the environment variable
+            $updateEnvStmt = $pdo->prepare("
+                UPDATE environment_variables 
+                SET value = :value, updated_at = NOW() 
+                WHERE id = :id
+            ");
+            $updateEnvStmt->execute(['value' => $appUrlForEnv, 'id' => $envVar['id']]);
+            
+            $envUpdateResults[] = [
+                'key' => $envVar['key'],
+                'old_value' => $envVar['value'],
+                'new_value' => $appUrlForEnv,
+                'updated' => true
+            ];
+            
+            error_log("[Custom API] Updated {$envVar['key']} from {$envVar['value']} to {$appUrlForEnv}");
+        }
+    }
+    
+    if (empty($envUpdateResults)) {
+        error_log('[Custom API] No APP_URL-like environment variables found to update');
+    }
+    
+} catch (Exception $e) {
+    error_log('[Custom API] Warning: Failed to update environment variables: ' . $e->getMessage());
+    $envUpdateResults[] = ['error' => $e->getMessage()];
+}
+
+// ================= 6️⃣ Trigger redeploy via API =================
 $redeployEndpoint = null;
 $redeployResponse = null;
 $httpCode = null;
@@ -247,7 +330,7 @@ if ($curlErr) {
 
 error_log('[Custom API] Triggered redeploy/restart for UUID: ' . $appUuid . ' - Endpoint: ' . $redeployEndpoint . ' - HTTP Code: ' . $httpCode);
 
-// ================= 6️⃣ Output JSON =================
+// ================= 7️⃣ Output JSON =================
 $result = [
     'success' => true,
     'resource_type' => $resourceType,
@@ -258,6 +341,7 @@ $result = [
     'new_fqdn' => $newFqdn,
     'protocol_preserved' => $protocol,
     'port_preserved' => $port ? $port : 'none',
+    'env_variables_updated' => $envUpdateResults,
     'redeploy_endpoint' => $redeployEndpoint,
     'redeploy_http' => $httpCode,
     'redeploy_response' => $response,
