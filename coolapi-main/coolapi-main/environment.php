@@ -55,37 +55,46 @@ $envVars = null;
 
 // Check service_applications first
 $stmt = $pdo->prepare("
-    SELECT sa.uuid AS app_uuid, sa.name AS app_name, sa.env_variables, s.uuid AS service_uuid
+    SELECT sa.uuid AS app_uuid, sa.name AS app_name, s.uuid AS service_uuid
     FROM service_applications sa
     JOIN services s ON sa.service_id = s.id
     WHERE sa.uuid = :uuid
     LIMIT 1
 ");
-$stmt->execute(['uuid' => $uuid]);
-$app = $stmt->fetch(PDO::FETCH_ASSOC);
-
-if ($app) {
-    $appUuid = $app['app_uuid'];
-    $serviceUuid = $app['service_uuid'];
-    $envVars = $app['env_variables'];
-    $resourceType = 'service';
-} else {
-    // Check applications table
-    $stmt = $pdo->prepare("
-        SELECT uuid, name, env_variables
-        FROM applications
-        WHERE uuid = :uuid
-        LIMIT 1
-    ");
+try {
     $stmt->execute(['uuid' => $uuid]);
     $app = $stmt->fetch(PDO::FETCH_ASSOC);
     
     if ($app) {
-        $appUuid = $app['uuid'];
-        $envVars = $app['env_variables'];
-        $resourceType = 'application';
+        $appUuid = $app['app_uuid'];
+        $serviceUuid = $app['service_uuid'];
+        $resourceType = 'service';
+    }
+} catch (Exception $e) {
+    error_log('[v0] Service app query failed: ' . $e->getMessage());
+}
+
+if (!$appUuid) {
+    // Check applications table
+    $stmt = $pdo->prepare("
+        SELECT uuid, name
+        FROM applications
+        WHERE uuid = :uuid
+        LIMIT 1
+    ");
+    try {
+        $stmt->execute(['uuid' => $uuid]);
+        $app = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        if ($app) {
+            $appUuid = $app['uuid'];
+            $resourceType = 'application';
+        }
+    } catch (Exception $e) {
+        error_log('[v0] Application query failed: ' . $e->getMessage());
     }
 }
+
 
 if (!$appUuid) {
     http_response_code(404);
@@ -96,13 +105,55 @@ if (!$appUuid) {
     exit;
 }
 
+// ================= Fetch environment variables from Coolify API =================
+$envVars = array();
+
+// Try to get environment variables via Coolify API
+$envEndpoint = "$COOLIFY_URL/api/v1/";
+if ($resourceType === 'service' && $serviceUuid) {
+    $envEndpoint .= "services/$serviceUuid/applications/$appUuid/envs";
+} else {
+    $envEndpoint .= "applications/$appUuid/envs";
+}
+
+$ch = curl_init($envEndpoint);
+curl_setopt_array($ch, [
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_HTTPHEADER => [
+        "Authorization: Bearer {$provided_api_token}",
+        "Accept: application/json"
+    ]
+]);
+$response = curl_exec($ch);
+$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+curl_close($ch);
+
+if ($httpCode === 200) {
+    $envData = json_decode($response, true);
+    if (is_array($envData)) {
+        // Normalize response to key-value format
+        if (isset($envData[0]) && is_array($envData[0]) && isset($envData[0]['key'])) {
+            // Array of objects format
+            $envVars = array();
+            foreach ($envData as $env) {
+                if (isset($env['key'])) {
+                    $envVars[$env['key']] = isset($env['value']) ? $env['value'] : '';
+                }
+            }
+        } else {
+            // Already in key-value format
+            $envVars = $envData;
+        }
+    }
+}
+
 // ================= Handle GET request (fetch env vars) =================
 if ($method === 'GET') {
     echo json_encode([
         'success' => true,
         'uuid' => $appUuid,
         'resource_type' => $resourceType,
-        'environment_variables' => $envVars ? json_decode($envVars, true) : []
+        'environment_variables' => is_array($envVars) ? $envVars : []
     ], JSON_PRETTY_PRINT);
     exit;
 }
